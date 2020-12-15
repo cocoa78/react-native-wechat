@@ -305,6 +305,14 @@ Sends request for proceeding payment, then returns an object:
 | errCode | Number | 0 if authorization successed        |
 | errStr  | String | Error message if any error occurred |
 
+#### launchMini(payload)
+APP拉起小程序
+- `payload` {Object} the payment data
+ * @param {String} userName - 拉起的小程序的username
+ * @param {Integer} miniProgramType - 拉起小程序的类型. 0-正式版 1-开发版 2-体验版
+ * @param {String} path - 拉起小程序页面的可带参路径，不填默认拉起小程序首页
+- returns {Object}
+
 ## Installation
 
 ```sh
