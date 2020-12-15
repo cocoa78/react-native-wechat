@@ -16,6 +16,7 @@
 // Define error messages
 #define NOT_REGISTERED (@"registerApp required.")
 #define INVOKE_FAILED (@"WeChat API invoke returns false.")
+#define Link_Action_Key  @"Link_Action"
 
 @implementation RCTWeChat
 
@@ -28,6 +29,7 @@ RCT_EXPORT_MODULE()
     self = [super init];
     if (self) {
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(handleOpenURL:) name:@"RCTOpenURLNotification" object:nil];
+        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(continueUserActivity:) name:@"RCTContinueUserActivity" object:nil];
     }
     return self;
 }
@@ -50,6 +52,11 @@ RCT_EXPORT_MODULE()
     }
 }
 
+- (BOOL)continueUserActivity:(NSNotification *)aNotification
+{
+  return [WXApi handleOpenUniversalLink:[aNotification object][@"userActivity"] delegate:self];
+}
+
 - (dispatch_queue_t)methodQueue
 {
     return dispatch_get_main_queue();
@@ -59,18 +66,37 @@ RCT_EXPORT_MODULE()
     return YES;
 }
 
-RCT_EXPORT_METHOD(registerApp:(NSString *)appid
-                  :(RCTResponseSenderBlock)callback)
-{
-    self.appId = appid;
-    callback(@[[WXApi registerApp:appid] ? [NSNull null] : INVOKE_FAILED]);
+RCT_EXPORT_METHOD(appInitOver) {
+    [self sendLinkAction:NULL];
+}
+RCT_EXPORT_METHOD(receiveLinkAction){
+    NSUserDefaults *userDefaults = [NSUserDefaults standardUserDefaults];
+    [userDefaults removeObjectForKey:Link_Action_Key];
+    [userDefaults synchronize];
 }
 
-RCT_EXPORT_METHOD(registerAppWithDescription:(NSString *)appid
-                  :(NSString *)appdesc
+- (void)sendLinkAction:(NSString *)data {
+    // 缓存下信息
+    NSUserDefaults *userDefaults = [NSUserDefaults standardUserDefaults];
+    if (data == NULL) {
+        data = [userDefaults objectForKey:Link_Action_Key];
+    } else {
+        [userDefaults setObject:data forKey:Link_Action_Key];
+        [userDefaults synchronize];
+    }
+    if (data != NULL) {
+        NSMutableDictionary *body = @{@"errCode":@(0)}.mutableCopy;
+        body[@"data"] = data;
+        [self.bridge.eventDispatcher sendDeviceEventWithName:@"Link_Action" body:body];
+    }
+}
+
+RCT_EXPORT_METHOD(registerAppWithUniversalLink:(NSString *)appid
+                  :(NSString *)universalLink
                   :(RCTResponseSenderBlock)callback)
 {
-    callback(@[[WXApi registerApp:appid withDescription:appdesc] ? [NSNull null] : INVOKE_FAILED]);
+  self.appId = appid;
+  callback(@[[WXApi registerApp:appid universalLink:universalLink] ? [NSNull null] : INVOKE_FAILED]);
 }
 
 RCT_EXPORT_METHOD(isWXAppInstalled:(RCTResponseSenderBlock)callback)
@@ -103,7 +129,9 @@ RCT_EXPORT_METHOD(sendRequest:(NSString *)openid
 {
     BaseReq* req = [[BaseReq alloc] init];
     req.openID = openid;
-    callback(@[[WXApi sendReq:req] ? [NSNull null] : INVOKE_FAILED]);
+    [WXApi sendReq:req completion:^(BOOL success) {
+        callback(@[success ? [NSNull null] : INVOKE_FAILED]);
+    }];
 }
 
 RCT_EXPORT_METHOD(sendAuthRequest:(NSString *)scope
@@ -113,15 +141,18 @@ RCT_EXPORT_METHOD(sendAuthRequest:(NSString *)scope
     SendAuthReq* req = [[SendAuthReq alloc] init];
     req.scope = scope;
     req.state = state;
-    BOOL success = [WXApi sendReq:req];
-    callback(@[success ? [NSNull null] : INVOKE_FAILED]);
+    [WXApi sendReq:req completion:^(BOOL success) {
+      callback(@[success ? [NSNull null] : INVOKE_FAILED]);
+    }];
 }
 
 RCT_EXPORT_METHOD(sendSuccessResponse:(RCTResponseSenderBlock)callback)
 {
     BaseResp* resp = [[BaseResp alloc] init];
     resp.errCode = WXSuccess;
-    callback(@[[WXApi sendResp:resp] ? [NSNull null] : INVOKE_FAILED]);
+    [WXApi sendResp:resp completion:^(BOOL success) {
+       callback(@[success ? [NSNull null] : INVOKE_FAILED]);
+    }];
 }
 
 RCT_EXPORT_METHOD(sendErrorCommonResponse:(NSString *)message
@@ -130,7 +161,9 @@ RCT_EXPORT_METHOD(sendErrorCommonResponse:(NSString *)message
     BaseResp* resp = [[BaseResp alloc] init];
     resp.errCode = WXErrCodeCommon;
     resp.errStr = message;
-    callback(@[[WXApi sendResp:resp] ? [NSNull null] : INVOKE_FAILED]);
+    [WXApi sendResp:resp completion:^(BOOL success) {
+        callback(@[success ? [NSNull null] : INVOKE_FAILED]);
+    }];
 }
 
 RCT_EXPORT_METHOD(sendErrorUserCancelResponse:(NSString *)message
@@ -139,7 +172,9 @@ RCT_EXPORT_METHOD(sendErrorUserCancelResponse:(NSString *)message
     BaseResp* resp = [[BaseResp alloc] init];
     resp.errCode = WXErrCodeUserCancel;
     resp.errStr = message;
-    callback(@[[WXApi sendResp:resp] ? [NSNull null] : INVOKE_FAILED]);
+    [WXApi sendResp:resp completion:^(BOOL success) {
+        callback(@[success ? [NSNull null] : INVOKE_FAILED]);
+    }];
 }
 
 RCT_EXPORT_METHOD(shareToTimeline:(NSDictionary *)data
@@ -160,6 +195,19 @@ RCT_EXPORT_METHOD(shareToFavorite:(NSDictionary *)data
     [self shareToWeixinWithData:data scene:WXSceneFavorite callback:callback];
 }
 
+RCT_EXPORT_METHOD(launchMini:(NSDictionary *)data
+                  :(RCTResponseSenderBlock)callback)
+{
+  WXLaunchMiniProgramReq *launchMiniProgramReq = [WXLaunchMiniProgramReq object];
+  launchMiniProgramReq.userName = data[@"userName"];  //拉起的小程序的username
+  launchMiniProgramReq.path = data[@"path"];    //拉起小程序页面的可带参路径，不填默认拉起小程序首页
+  //拉起小程序的类型
+  launchMiniProgramReq.miniProgramType = [data[@"miniProgramType"] integerValue];
+    [WXApi sendReq:launchMiniProgramReq completion:^(BOOL success) {
+        callback(@[success ? [NSNull null] : INVOKE_FAILED]);
+    }];
+}
+
 RCT_EXPORT_METHOD(pay:(NSDictionary *)data
                   :(RCTResponseSenderBlock)callback)
 {
@@ -170,8 +218,9 @@ RCT_EXPORT_METHOD(pay:(NSDictionary *)data
     req.timeStamp           = [data[@"timeStamp"] unsignedIntValue];
     req.package             = data[@"package"];
     req.sign                = data[@"sign"];
-    BOOL success = [WXApi sendReq:req];
-    callback(@[success ? [NSNull null] : INVOKE_FAILED]);
+    [WXApi sendReq:req completion:^(BOOL success) {
+        callback(@[success ? [NSNull null] : INVOKE_FAILED]);
+    }];
 }
 
 - (void)shareToWeixinWithData:(NSDictionary *)aData
@@ -285,6 +334,27 @@ RCT_EXPORT_METHOD(pay:(NSDictionary *)data
                                        MediaTag:mediaTagName
                                        callBack:callback];
 
+        } else if ([type isEqualToString:RCTWXShareTypeMini]) {
+        NSString *hdImageDataString = aData[@"hdImageData"];
+        NSData *hdImageData =  [hdImageDataString hasPrefix:@"http"] ? [NSData dataWithContentsOfURL:[NSURL URLWithString:aData[@"hdImageData"]]] : [NSData dataWithContentsOfFile:aData[@"hdImageData"]];
+        WXMiniProgramObject *miniObject = [WXMiniProgramObject object];
+        miniObject.webpageUrl = aData[@"webpageUrl"];
+        miniObject.userName = aData[@"userName"];
+        miniObject.path = aData[@"path"];
+        miniObject.withShareTicket = [aData[@"withShareTicket"] boolValue];
+        miniObject.miniProgramType = [aData[@"miniProgramType"] integerValue];
+        miniObject.hdImageData = hdImageData;
+        
+        [self shareToWeixinWithMediaMessage:aScene
+                                        Title:title
+                                Description:description
+                                    Object:miniObject
+                                MessageExt:messageExt
+                                MessageAction:messageAction
+                                ThumbImage:aThumbImage
+                                    MediaTag:mediaTagName
+                                    callBack:callback];
+        
         } else {
             callback(@[@"message type unsupported"]);
         }
@@ -317,8 +387,9 @@ RCT_EXPORT_METHOD(pay:(NSDictionary *)data
     req.scene = aScene;
     req.text = text;
 
-    BOOL success = [WXApi sendReq:req];
-    callback(@[success ? [NSNull null] : INVOKE_FAILED]);
+    [WXApi sendReq:req completion:^(BOOL success) {
+        callback(@[success ? [NSNull null] : INVOKE_FAILED]);
+    }];
 }
 
 - (void)shareToWeixinWithMediaMessage:(int)aScene
@@ -345,15 +416,20 @@ RCT_EXPORT_METHOD(pay:(NSDictionary *)data
     req.scene = aScene;
     req.message = message;
 
-    BOOL success = [WXApi sendReq:req];
-    callback(@[success ? [NSNull null] : INVOKE_FAILED]);
+    [WXApi sendReq:req completion:^(BOOL success) {
+        callback(@[success ? [NSNull null] : INVOKE_FAILED]);
+    }];
 }
 
 #pragma mark - wx callback
 
 -(void) onReq:(BaseReq*)req
 {
-    // TODO(Yorkie)
+    if ([req isKindOfClass:[LaunchFromWXReq class]]) {
+        LaunchFromWXReq *r = (LaunchFromWXReq*)req;
+        WXMediaMessage *message =  r.message;
+        [self sendLinkAction:message.messageExt];
+    }
 }
 
 -(void) onResp:(BaseResp*)resp
@@ -393,7 +469,16 @@ RCT_EXPORT_METHOD(pay:(NSDictionary *)data
 	        body[@"returnKey"] =r.returnKey;
 	        body[@"type"] = @"PayReq.Resp";
 	        [self.bridge.eventDispatcher sendDeviceEventWithName:RCTWXEventName body:body];
-    	}
+    }else if ([resp isKindOfClass:[WXLaunchMiniProgramResp class]])
+    {
+        WXLaunchMiniProgramResp *r = (WXLaunchMiniProgramResp *)resp;
+        NSMutableDictionary *body = @{@"errCode":@(r.errCode)}.mutableCopy;
+        body[@"errStr"] = r.errStr;
+        body[@"extMsg"] = r.extMsg;
+        body[@"type"] = @"WXLaunchMiniProgramReq.Resp";
+        [self.bridge.eventDispatcher sendDeviceEventWithName:RCTWXEventName body:body];
+        [self sendLinkAction:r.extMsg];
+    }
 }
 
 @end
